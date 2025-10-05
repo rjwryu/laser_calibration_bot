@@ -1,10 +1,10 @@
 <package format="2">
-  <name>fyp_robot_assem</name>
+  <name>fyp_robot_urdf</name>
   <version>1.0.0</version>
   <description>
-    <p>URDF Description package for fyp_robot_assem</p>
+    <p>URDF Description package for fyp_robot_urdf</p>
     <p>This package contains configuration data, 3D models and launch files
-for fyp_robot_assem robot</p>
+for fyp_robot_urdf robot</p>
   </description>
   <author>TODO</author>
   <maintainer email="TODO@email.com" />

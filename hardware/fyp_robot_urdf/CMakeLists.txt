@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8.3)
 
-project(fyp_robot_assem)
+project(fyp_robot_urdf)
 
 find_package(catkin REQUIRED)
 
