@@ -1,0 +1,40 @@
+<robot name="my_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+<xacro:property name="project_name" value="cable_robot" />
+<xacro:property name="ifname" value="can0" />
+<xacro:property name="actuator_id" value="1" />
+<xacro:property name="torque_constant" value="1" />
+
+  <link name="base_link"/>
+  <link name="joint_link"/>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="joint_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- ros2_control hardware definition -->
+  <ros2_control name="${project_name}" type="actuator">
+    <hardware>
+      <plugin>myactuator_rmd_hardware/MyActuatorRmdHardwareInterface</plugin>
+      <param name="ifname">${ifname}</param>
+      <param name="actuator_id">${actuator_id}</param>
+      <param name="torque_constant">${torque_constant}</param>
+      <!-- Optional: Low-pass filters for velocity and effort (0 < alpha <= 1); defaults to no filter -->
+      <param name="velocity_alpha">0.1</param>
+      <param name="effort_alpha">0.1</param>
+      <!-- Optional: Cycle time of the asynchronous thread; defaults to 1ms (1000Hz) -->
+      <param name="cycle_time">1</param>
+    </hardware>
+    <joint name="joint_1">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+</robot>
