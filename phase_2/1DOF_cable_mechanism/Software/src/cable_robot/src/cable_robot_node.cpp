@@ -21,10 +21,17 @@ public:
                 std::chrono::milliseconds(100),
                 std::bind(&CableRobotNode::controlLoop, this));
 
+        // register my shutdown handler before exit
+        // using rclcpp::contexts::get_global_default_context;
+        // get_global_default_context()->add_pre_shutdown_callback([this]() { this->shutdown(); });
+        rclcpp::contexts::get_global_default_context()->add_pre_shutdown_callback(
+                std::bind(&CableRobotNode::shutdown, this));
+
         RCLCPP_INFO(this->get_logger(),
                 "Cable Driven Node initialized");
     }
 
+    // stop the motor (velocity zero) before exit
     void shutdown() {
         timer_->cancel();
 
@@ -33,10 +40,6 @@ public:
         msg.data = { 0.0 };
         cmd_pub_->publish(msg);
 
-        RCLCPP_INFO(this->get_logger(),
-                "Stopping motor...");
-
-        rclcpp::sleep_for(std::chrono::seconds(1));
         RCLCPP_INFO(this->get_logger(),
                 "Stopped motor");
     }
@@ -65,7 +68,5 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<CableRobotNode>();
     rclcpp::spin(node);
-    node->shutdown();
-    rclcpp::shutdown();
     return 0;
 }
