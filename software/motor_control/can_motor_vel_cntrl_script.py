@@ -24,6 +24,7 @@ def stop_all():
     for m in MOTORS:
         send(m, [0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00])  # Stop
     print("Motors stopped")
+    bus.shutdown()
 
 def set_speed(id, rpm):
     """Send speed command to a motor (in RPM), Converts DEC To HEX"""
@@ -39,8 +40,11 @@ def demo_motion():
 
     # Spin each motor at different speeds
     set_speed(0x141, 10000)
+    time.sleep(1)
     set_speed(0x142, 10000)
+    time.sleep(1)
     set_speed(0x143, 10000)
+    time.sleep(1)
     set_speed(0x144, 10000)
 
     time.sleep(5)
