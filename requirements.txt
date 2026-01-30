@@ -2,3 +2,6 @@ numpy
 pandas
 scipy
 matplotlib
+python-can
+pyqtgraph
+PySide6

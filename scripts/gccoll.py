@@ -33,9 +33,9 @@ def main(can_channel: str, motor_id: int, output_file: TextIO) -> None:
 
         print(f"Initial angle: {angle}°")
 
-        # print(f"Resetting angle... ", end="")
-        # motor.reset_zero_pos()
-        # print("Done")
+        print(f"Resetting angle... ", end="")
+        motor.reset_zero_pos()
+        print("Done")
 
         writer = csv.writer(output_file)
         writer.writerow(["timestamp", "shaft_angle", "shaft_speed", "current"])
