@@ -33,7 +33,7 @@ class GravityRLS:
         self.lmbda = lmbda  # Forgetting factor (0.9 to 0.999)
         self.P = np.eye(4) * delta     # Initial uncertainty matrix
 
-    def update(self, pos: float, vel: float, acc: float, cur: float):
+    def update(self, pos: float, vel: float, acc: float, cur: float) -> None:
         """
         Update the recursive solver with new data.
 
@@ -93,18 +93,20 @@ class GravityRLS:
 
 class GCMotorController(QObject):
     motor_feedback_signal = Signal(float, dict)
-    estop_signal = Signal(str)
+    error_signal = Signal()
 
-    def __init__(self, can_channel: str, motor_id: int, max_speed: float):
+    def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
         super().__init__()
         self.bus = can.Bus(channel=can_channel, interface="socketcan")
         self.motor = RMDController(motor_id, self.bus)
-        self._start_time = time.time()
         params = GravityModelParams(k=1, b=1, j=1, mgr=1, alpha=1)
         self.gc_solver = GravityRLS(params)
         self.max_speed = max_speed
+        self.max_current = max_current
+        self._start_time = time.time()
 
     def run(self):
+        print("Info: Starting motor")
         self._running = True
         past_speed = 0
         prev_time = time.time() - self._start_time
@@ -126,13 +128,14 @@ class GCMotorController(QObject):
 
             # Use model to predict the current to apply
             current_setpoint = self.gc_solver.predict(angle, speed, accel)
+            current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
             fb = self.motor.set_current(current_setpoint)
             if fb is None:
                 continue
 
             # Enforce speed limit with emergency stop
-            if fb.speed > self.max_speed:
-                self.estop_signal.emit("Fatal: Speed limit exceeded, stopping motor")
+            if abs(fb.speed) > self.max_speed:
+                self.error_signal.emit()
                 print("Fatal: Speed limit exceeded, stopping motor")
                 break
 
@@ -145,7 +148,7 @@ class GCMotorController(QObject):
             # Update coefficients of gravity model through RLS
             self.gc_solver.update(angle, speed, accel, cur)
             params = self.gc_solver.params
-            print(f"{fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+            print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
 
             self.motor_feedback_signal.emit(
                 elapsed_time,
@@ -156,52 +159,13 @@ class GCMotorController(QObject):
                 },
             )
 
-    def stop(self):
-        self._running = False
+        print("Info: Shutting down motor")
         self.motor.shutdown_motor()
         self.bus.shutdown()
 
+    def stop(self):
+        self._running = False
 
-### 1st RLS attempt
-# def main(can_channel: str, motor_id: int) -> None:
-#     def handle_interrupt(sig, frame):
-#         global is_running
-#         is_running = False
-#
-#     global is_running
-#     is_running = True
-#     gc_solver = GravityRLS()
-#
-#     signal.signal(signal.SIGINT, handle_interrupt)
-#
-#     with can.Bus(channel=can_channel, interface="socketcan") as bus:
-#         motor = RMDController(motor_id, bus)
-#         motor.set_current(0)
-#
-#         past_speed = 0
-#         prev_time = time.time()
-#         while is_running:
-#             fb = motor.get_motor_feedback()
-#             now = time.time()
-#             delta_time = now - prev_time
-#             prev_time = now
-#             if fb is None:
-#                 continue
-#             angle = (fb.position % 360) * np.pi / 180
-#             speed = fb.speed * np.pi / 180
-#             accel = (fb.speed - past_speed) / delta_time
-#
-#             # Find coefficients of gravity model through RLS
-#             c1, c2, b, j = gc_solver.update(angle, speed, accel, fb.current)
-#             print(f"Angle: {angle:3d}°, Current: {fb.current:+10.5f}A, c1: {c1:+10.5f}, c2: {c2:+10.5f}, b/k: {b:+10.5f}, j/k: {j:+10.5f}")
-#
-#             # i = C1*sin(theta) + C2*cos(theta) + B/K*omega + J/K*alpha
-#             current_setpoint = c1*np.sin(angle) + c2*np.cos(angle) + b*speed + j*accel
-#             fb = motor.set_current(current_setpoint)
-#             if fb is None:
-#                 continue
-#
-#         motor.shutdown_motor()
 
 def main():
     parser = argparse.ArgumentParser(description = desc)
@@ -225,16 +189,20 @@ def main():
     parser.add_argument(
         "--max-speed",
         type=float,
-        default=720,
-        help="Speed limit before emergency stop is activated. Defaults to 720dps."
+        default=360,
+        help="Speed limit before emergency stop is activated. Defaults to 360dps."
+    )
+    parser.add_argument(
+        "--max-current",
+        type=float,
+        default=5,
+        help="Saturation current applied by the controller. Defaults to 5A."
     )
 
     args = parser.parse_args()
     app = QApplication(sys.argv)
-    controller = GCMotorController(args.interface, args.motor, args.max_speed)
+    controller = GCMotorController(args.interface, args.motor, args.max_speed, args.max_current)
     window = LiveMotorPlotWindow(controller, args.samples)
-
-    controller.estop_signal.connect(app.quit)
 
     window.show()
     sys.exit(app.exec())

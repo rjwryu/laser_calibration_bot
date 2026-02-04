@@ -11,6 +11,9 @@ import can
 def starts_with(start_data: bytes | list[int]):
     return lambda data: data.startswith(bytes(start_data))
 
+def create_timeout_msg(action_name: str="motor response"):
+    return f"Warning: Timeout waiting for {action_name}"
+
 @dataclass
 class MotorFeedback:
     """
@@ -76,7 +79,7 @@ class RMDController:
             print("CAN receive error:", e)
             return None
 
-    def wait_for_msg(self, msg_filter, timeout=0.5, can_id: int | None=None) -> bytes | None:
+    def wait_for_msg(self, msg_filter, timeout=0.5, can_id: int | None=None, timeout_msg: str=create_timeout_msg()) -> bytes | None:
         """
         Wait for a CAN message to be received that matches the given filter.
 
@@ -93,7 +96,7 @@ class RMDController:
         while True:
             now = time.time()
             if now > end_time:
-                print("Warning: Timeout waiting for motor reply")
+                print(timeout_msg)
                 return None
 
             msg = self.receive(timeout=end_time - now)
@@ -112,7 +115,7 @@ class RMDController:
         reply = None
         for _ in range(spam_max):
             self.send(struct.pack("<Bxxxxxxx", 0x81))
-            reply = self.wait_for_msg(starts_with([0x81]), timeout=spam_interval)
+            reply = self.wait_for_msg(starts_with([0x81]), timeout=spam_interval, timeout_msg=create_timeout_msg("stop_motor"))
             if reply:
                 return True
 
@@ -132,7 +135,7 @@ class RMDController:
         reply = None
         for _ in range(spam_max):
             self.send(struct.pack("<Bxxxxxxx", 0x80))
-            reply = self.wait_for_msg(starts_with([0x80]), timeout=spam_interval)
+            reply = self.wait_for_msg(starts_with([0x80]), timeout=spam_interval, timeout_msg=create_timeout_msg("shutdown_motor"))
             if reply:
                 return True
 
@@ -150,7 +153,7 @@ class RMDController:
         dps = int(speed * 100)  # speed in dps
         self.send(struct.pack("<Bxxxi", 0xA2, dps))
 
-        reply = self.wait_for_msg(starts_with([0xA2]))
+        reply = self.wait_for_msg(starts_with([0xA2]), timeout_msg=create_timeout_msg("set_speed"))
         if reply is None:
             return None
 
@@ -167,7 +170,7 @@ class RMDController:
         i = int(current / 0.01)
         self.send(struct.pack("<Bxxxhxx", 0xA1, i))
 
-        reply = self.wait_for_msg(starts_with([0xA1]))
+        reply = self.wait_for_msg(starts_with([0xA1]), timeout_msg=create_timeout_msg("set_current"))
         if reply is None:
             return None
 
@@ -186,7 +189,7 @@ class RMDController:
         mv = int(max_speed / 1)
         self.send(struct.pack("<Bxhi", 0xA4, mv, p))
 
-        reply = self.wait_for_msg(starts_with([0xA4]))
+        reply = self.wait_for_msg(starts_with([0xA4]), timeout_msg=create_timeout_msg("set_position"))
         if reply is None:
             return None
 
@@ -201,7 +204,7 @@ class RMDController:
 
         self.send(struct.pack("<Bxxxxxxx", 0x92))
 
-        reply = self.wait_for_msg(starts_with([0x92]))
+        reply = self.wait_for_msg(starts_with([0x92]), timeout_msg=create_timeout_msg("get_position"))
         if reply is None:
             return None
 
@@ -218,7 +221,7 @@ class RMDController:
 
         self.send(struct.pack("<Bxxxxxxx", 0x9C))
 
-        reply = self.wait_for_msg(starts_with([0x9C]))
+        reply = self.wait_for_msg(starts_with([0x9C]), timeout_msg=create_timeout_msg("get_motor_feedback"))
         if reply is None:
             return None
 
@@ -237,7 +240,7 @@ class RMDController:
         for i in range(len(params)):
             self.send(struct.pack("<BBxxf", 0x31, function_code[i], float(params[i])))
 
-            reply = self.wait_for_msg(starts_with([0x31, function_code[i]]))
+            reply = self.wait_for_msg(starts_with([0x31, function_code[i]]), timeout_msg=create_timeout_msg("set_pid_params"))
             if reply is None:
                 print(f"Warning: No acknowledgment received for setting PID param {i}.")
 
@@ -252,7 +255,7 @@ class RMDController:
         for i in range(len(params)):
             self.send(struct.pack("<BBxxf", 0x32, function_code[i], float(params[i])))
 
-            reply = self.wait_for_msg(starts_with([0x32, function_code[i]]))
+            reply = self.wait_for_msg(starts_with([0x32, function_code[i]]), timeout_msg=create_timeout_msg("save_pid_params"))
             if reply is None:
                 print(f"Warning: No acknowledgment received for saving PID param {i}.")
 
@@ -269,7 +272,7 @@ class RMDController:
         for i in range(len(function_code)):
             self.send(struct.pack("<BBxxxxxx", 0x30, function_code[i]))
 
-            reply = self.wait_for_msg(starts_with([0x30, function_code[i]]))
+            reply = self.wait_for_msg(starts_with([0x30, function_code[i]]), timeout_msg=create_timeout_msg("get_pid_params"))
             if reply is None:
                 print(f"Warning: No response received for PID param {i}")
                 return None
@@ -289,7 +292,7 @@ class RMDController:
         for i in range(4):
             self.send(struct.pack("<BBxxi", 0x43, i, acc[i]))
 
-            reply = self.wait_for_msg(starts_with([0x43]))
+            reply = self.wait_for_msg(starts_with([0x43]), timeout_msg=create_timeout_msg("set_max_acc"))
             if reply is None:
                 print(f"Warning: No response received for setting max accel param {i}.")
 
@@ -305,7 +308,7 @@ class RMDController:
         for i in range(4):
             self.send(struct.pack("<BBxxxxxx", 0x42, i))
 
-            reply = self.wait_for_msg(starts_with([0x42, i]))
+            reply = self.wait_for_msg(starts_with([0x42, i]), timeout_msg=create_timeout_msg("get_max_acc"))
 
             if reply is None:
                 print(f"Warning: No response received for acceleration limit {i}.")
@@ -325,7 +328,7 @@ class RMDController:
 
         self.send(struct.pack("<Bxxxxxxx", 0x64))
 
-        reply = self.wait_for_msg(starts_with([0x64]))
+        reply = self.wait_for_msg(starts_with([0x64]), timeout_msg=create_timeout_msg("reset_zero_pos"))
 
         if reply is None:
             print("Warning: No response received for encoder position re-zero.")

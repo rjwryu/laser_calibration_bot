@@ -51,6 +51,7 @@ class LiveMotorPlotWindow(QWidget):
         # Connect signals
         self._thread.started.connect(self._worker.run)
         self._worker.motor_feedback_signal.connect(self.update_plot)
+        self._worker.error_signal.connect(self.close)
 
         self._thread.start()
 
@@ -65,5 +66,6 @@ class LiveMotorPlotWindow(QWidget):
         """Clean up threads when window is closed."""
         self._worker.stop()
         self._thread.quit()
-        self._thread.wait()
+        if not self._thread.wait(3000):
+            print("Warning: Timeout waiting for thread to stop")
         event.accept()
