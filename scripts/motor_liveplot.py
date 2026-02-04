@@ -5,15 +5,36 @@ Live plotting of motor feedback.
 """
 
 from collections import deque
+from dataclasses import dataclass
+from typing import Any
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 import pyqtgraph as pg
 
 
+@dataclass
+class Datapoint:
+    data: float
+    title: str
+    units: str
+    colour: str
+
+
+@dataclass
+class Plot:
+    plot: Any
+    curve: Any
+    buffer: deque
+
+
 class LiveMotorPlotWindow(QWidget):
-    def __init__(self, data_source, sample_window: int):
+    def __init__(self, data_source, sample_window: int, plot_wrap: int):
         super().__init__()
+
+        self._sample_window = sample_window
+        self._plot_wrap = plot_wrap
+
         self.setWindowTitle("Motor Feedback")
         self._layout = QVBoxLayout(self)
 
@@ -21,31 +42,12 @@ class LiveMotorPlotWindow(QWidget):
         self._win = pg.GraphicsLayoutWidget(show=True)
         self._layout.addWidget(self._win)
 
-        self._sensors = ["position", "speed", "current"]
-        self._sensor_data = {
-            "position": ("y", "degrees"),
-            "speed":    ("c", "degrees/s"),
-            "current":  ("m", "amperes"),
-        }
-        self._plots = {}
-        self._curves = {}
-        self._buffers = {}
-        self._times = deque(maxlen=sample_window)
-        for i in range(len(self._sensors)):
-            if i == 2:
-                self._win.nextRow()
-            sensor = self._sensors[i]
-            colour, unit = self._sensor_data[sensor]
-            self._plots[sensor] = self._win.addPlot(title=sensor)
-            self._curves[sensor] = self._plots[sensor].plot(pen=colour)
-            self._plots[sensor].setLabel("left", unit)
-            self._buffers[sensor] = deque(maxlen=sample_window)
+        self.plots = {}
+        self.times = deque(maxlen=sample_window)
 
         # --- Setup Threading ---
         self._thread = QThread()
         self._worker = data_source
-
-        # Move worker to the new thread
         self._worker.moveToThread(self._thread)
 
         # Connect signals
@@ -55,12 +57,32 @@ class LiveMotorPlotWindow(QWidget):
 
         self._thread.start()
 
-    def update_plot(self, timestamp: float, values: dict):
+    def add_plot(self, title: str, colour: str="k", units: str=""):
+        num_plots = len(self.plots)
+        if num_plots > 0 and num_plots % self._plot_wrap == 0:
+            self._win.nextRow()
+
+        plot = self._win.addPlot(title=title)
+        curve = plot.plot(pen=colour)
+        plot.setLabel("left", units)
+        buffer = deque(maxlen=self._sample_window)
+
+        self.plots[title] = Plot(plot, curve, buffer)
+
+    def update_plot(self, timestamp: float, datapoints: list[Datapoint]):
         """This runs in the Main Thread whenever the worker sends data."""
-        self._times.append(timestamp)
-        for name, value in values.items():
-            self._buffers[name].append(value)
-            self._curves[name].setData(list(self._times), list(self._buffers[name]))
+        # Add common timestamp
+        self.times.append(timestamp)
+
+        for dp in datapoints:
+            # Add plot if not already existing
+            if dp.title not in self.plots:
+                self.add_plot(dp.title, dp.colour, dp.units)
+
+            # Set the data and plot
+            p = self.plots[dp.title]
+            p.buffer.append(dp.data)
+            p.curve.setData(list(self.times), list(p.buffer))
 
     def closeEvent(self, event):
         """Clean up threads when window is closed."""

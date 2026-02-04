@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 import can
 import numpy as np
 
-from motor_liveplot import LiveMotorPlotWindow
+from motor_liveplot import LiveMotorPlotWindow, Datapoint
 from rmd_controller import RMDController
 
 
@@ -92,7 +92,7 @@ class GravityRLS:
 
 
 class GCMotorController(QObject):
-    motor_feedback_signal = Signal(float, dict)
+    motor_feedback_signal = Signal(float, list)
     error_signal = Signal()
 
     def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
@@ -105,31 +105,18 @@ class GCMotorController(QObject):
         self.max_current = max_current
         self._start_time = time.time()
 
-    def run(self):
+    def observe(self):
         print("Info: Starting motor")
         self._running = True
         past_speed = 0
         prev_time = time.time() - self._start_time
-
-        fb = self.motor.get_motor_feedback()
-        if fb is None:
-            print("Error: could not get motor feedback")
-            return
-
-        # Process the results of sending current
-        angle = (fb.position % 360) * np.pi / 180
-        speed = fb.speed * np.pi / 180
-        accel = 0
 
         while self._running:
             elapsed_time = time.time() - self._start_time
             delta_time = elapsed_time - prev_time
             prev_time = elapsed_time
 
-            # Use model to predict the current to apply
-            current_setpoint = self.gc_solver.predict(angle, speed, accel)
-            current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
-            fb = self.motor.set_current(current_setpoint)
+            fb = self.motor.get_motor_feedback()
             if fb is None:
                 continue
 
@@ -139,29 +126,85 @@ class GCMotorController(QObject):
                 print("Fatal: Speed limit exceeded, stopping motor")
                 break
 
-            # Process the results of sending current
-            angle = (fb.position % 360) * np.pi / 180
-            speed = fb.speed * np.pi / 180
             accel = (fb.speed - past_speed) / delta_time
-            cur = fb.current
+            past_speed = fb.speed
 
-            # Update coefficients of gravity model through RLS
-            self.gc_solver.update(angle, speed, accel, cur)
-            params = self.gc_solver.params
-            print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+            print(f"Info: {fb.position % 360:+10d}°, {fb.speed:+10.5f}°/s, {accel:+10.5f}°/s², {fb.current:+10.5f}A")
 
             self.motor_feedback_signal.emit(
                 elapsed_time,
-                {
-                    "position": fb.position,
-                    "speed":    fb.speed,
-                    "current":  fb.current,
-                },
+                [
+                    Datapoint(fb.position, "position", "degrees", "y"),
+                    Datapoint(fb.speed, "speed", "degrees/s", "c"),
+                    Datapoint(accel, "acceleration", "degrees/s²", "w"),
+                    Datapoint(fb.current, "current", "amperes", "m"),
+                ],
             )
 
         print("Info: Shutting down motor")
         self.motor.shutdown_motor()
         self.bus.shutdown()
+
+    def run(self):
+        self.observe()
+
+        # print("Info: Starting motor")
+        # self._running = True
+        # past_speed = 0
+        # prev_time = time.time() - self._start_time
+        #
+        # fb = self.motor.get_motor_feedback()
+        # if fb is None:
+        #     print("Error: could not get motor feedback")
+        #     return
+        #
+        # # Process the results of sending current
+        # angle = (fb.position % 360) * np.pi / 180
+        # speed = fb.speed * np.pi / 180
+        # accel = 0
+        #
+        # while self._running:
+        #     elapsed_time = time.time() - self._start_time
+        #     delta_time = elapsed_time - prev_time
+        #     prev_time = elapsed_time
+        #
+        #     # Use model to predict the current to apply
+        #     current_setpoint = self.gc_solver.predict(angle, speed, accel)
+        #     current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
+        #     fb = self.motor.set_current(current_setpoint)
+        #     if fb is None:
+        #         continue
+        #
+        #     # Enforce speed limit with emergency stop
+        #     if abs(fb.speed) > self.max_speed:
+        #         self.error_signal.emit()
+        #         print("Fatal: Speed limit exceeded, stopping motor")
+        #         break
+        #
+        #     # Process the results of sending current
+        #     angle = (fb.position % 360) * np.pi / 180
+        #     speed = fb.speed * np.pi / 180
+        #     accel = (speed - past_speed) / delta_time
+        #     cur = fb.current
+        #     past_speed = speed
+        #
+        #     # Update coefficients of gravity model through RLS
+        #     self.gc_solver.update(angle, speed, accel, cur)
+        #     params = self.gc_solver.params
+        #     print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+        #
+        #     self.motor_feedback_signal.emit(
+        #         elapsed_time,
+        #         [
+        #             Datapoint(fb.position, "position", "degrees", "y"),
+        #             Datapoint(fb.speed, "speed", "degrees/s", "c"),
+        #             Datapoint(fb.current, "amperes", "amperes", "m"),
+        #         ],
+        #     )
+        #
+        # print("Info: Shutting down motor")
+        # self.motor.shutdown_motor()
+        # self.bus.shutdown()
 
     def stop(self):
         self._running = False
@@ -198,11 +241,17 @@ def main():
         default=5,
         help="Saturation current applied by the controller. Defaults to 5A."
     )
+    parser.add_argument(
+        "-w", "--plot-wrap",
+        type=int,
+        default=2,
+        help="Number of plots per row. Defaults to 2."
+    )
 
     args = parser.parse_args()
     app = QApplication(sys.argv)
     controller = GCMotorController(args.interface, args.motor, args.max_speed, args.max_current)
-    window = LiveMotorPlotWindow(controller, args.samples)
+    window = LiveMotorPlotWindow(controller, args.samples, args.plot_wrap)
 
     window.show()
     sys.exit(app.exec())
