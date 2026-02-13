@@ -5,3 +5,4 @@ matplotlib
 python-can
 pyqtgraph
 PySide6
+scikit-learn

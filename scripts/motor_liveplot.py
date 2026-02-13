@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, QObject, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 import pyqtgraph as pg
 
@@ -28,8 +28,22 @@ class Plot:
     buffer: deque
 
 
+class PlotDataSource(QObject):
+    update_signal = Signal(float, list)
+    error_signal = Signal()
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 class LiveMotorPlotWindow(QWidget):
-    def __init__(self, data_source, sample_window: int, plot_wrap: int):
+    def __init__(self, data_source: PlotDataSource, sample_window: int, plot_wrap: int):
         super().__init__()
 
         self._sample_window = sample_window
@@ -52,7 +66,7 @@ class LiveMotorPlotWindow(QWidget):
 
         # Connect signals
         self._thread.started.connect(self._worker.run)
-        self._worker.motor_feedback_signal.connect(self.update_plot)
+        self._worker.update_signal.connect(self.update_plot)
         self._worker.error_signal.connect(self.close)
 
         self._thread.start()

@@ -4,20 +4,21 @@ desc = """\
 Second attempt at gravity compensation, real-time gravity compensation.
 """
 
-from collections import deque
-import pandas as pd
 import argparse
 from dataclasses import dataclass
 import sys
 import time
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 import can
 import numpy as np
 
-from motor_liveplot import LiveMotorPlotWindow, Datapoint
+from motor_liveplot import Datapoint, LiveMotorPlotWindow, PlotDataSource
 from rmd_controller import RMDController
+
+
+class UserCancelledException(Exception):
+    pass
 
 
 @dataclass
@@ -93,10 +94,7 @@ class GravityRLS:
         return (self.params.mgr * np.cos(pos + self.params.alpha) + self.params.b * vel + self.params.j * acc) / self.params.k
 
 
-class GCMotorController(QObject):
-    motor_feedback_signal = Signal(float, list)
-    error_signal = Signal()
-
+class GCMotorController(PlotDataSource):
     def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
         super().__init__()
         self.bus = can.Bus(channel=can_channel, interface="socketcan")
@@ -107,49 +105,7 @@ class GCMotorController(QObject):
         self.max_current = max_current
         self._start_time = time.time()
 
-    def observe(self):
-        print("Info: Starting motor")
-        self._running = True
-        past_speed = 0
-        prev_time = time.time() - self._start_time
-
-        while self._running:
-            elapsed_time = time.time() - self._start_time
-            delta_time = elapsed_time - prev_time
-            prev_time = elapsed_time
-
-            fb = self.motor.get_motor_feedback()
-            if fb is None:
-                continue
-
-            # Enforce speed limit with emergency stop
-            if abs(fb.speed) > self.max_speed:
-                self.error_signal.emit()
-                print("Fatal: Speed limit exceeded, stopping motor")
-                break
-
-            accel = (fb.speed - past_speed) / delta_time
-            past_speed = fb.speed
-
-            print(f"Info: {fb.position % 360:+10d}°, {fb.speed:+10.5f}°/s, {accel:+10.5f}°/s², {fb.current:+10.5f}A")
-
-            self.motor_feedback_signal.emit(
-                elapsed_time,
-                [
-                    Datapoint(fb.position, "position", "degrees", "y"),
-                    Datapoint(fb.speed, "speed", "degrees/s", "c"),
-                    Datapoint(accel, "acceleration", "degrees/s²", "w"),
-                    Datapoint(fb.current, "current", "amperes", "m"),
-                ],
-            )
-
-        print("Info: Shutting down motor")
-        self.motor.shutdown_motor()
-        self.bus.shutdown()
-
     def gravity_compensation(self):
-        # self.observe()
-
         print("Info: Starting motor")
         self._running = True
         past_speed = 0
@@ -157,8 +113,7 @@ class GCMotorController(QObject):
 
         fb = self.motor.get_motor_feedback()
         if fb is None:
-            print("Error: could not get motor feedback")
-            return
+            raise RuntimeError("Error: Could not get motor feedback")
 
         # Process the results of sending current
         angle = (fb.position % 360) * np.pi / 180
@@ -180,8 +135,7 @@ class GCMotorController(QObject):
             # Enforce speed limit with emergency stop
             if abs(fb.speed) > self.max_speed:
                 self.error_signal.emit()
-                print("Fatal: Speed limit exceeded, stopping motor")
-                break
+                raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
 
             # Process the results of sending current
             angle = (fb.position % 360) * np.pi / 180
@@ -195,7 +149,7 @@ class GCMotorController(QObject):
             params = self.gc_solver.params
             print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
 
-            self.motor_feedback_signal.emit(
+            self.update_signal.emit(
                 elapsed_time,
                 [
                     Datapoint(fb.position, "position", "degrees", "y"),
@@ -204,101 +158,18 @@ class GCMotorController(QObject):
                 ],
             )
 
-        print("Info: Shutting down motor")
-        self.motor.shutdown_motor()
-        self.bus.shutdown()
-
-    def find_torque_constant(self, train_data_output: str):
-        train_data = { "added_mass": [], "current": [] }
-        num_weights = 0
-
-        gravity = 9.81
-        lever_arm = float(input("Enter length of lever arm (mm): "))
-        inc_weight = float(input("Enter mass of each weight to be added (g): "))
-        total_weights = int(input("Enter total number of weights to be added: "))
-
-        input("Point the link downwards and press Enter: ")
-
-        # Get zero position
-        zero_pos = self.motor.get_position()
-        if zero_pos is None:
-            print("Error: Couldn't get initial position")
-            self._cleanup()
-            return
-        print(f"Zero position: {zero_pos:+.5f}°")
-
-        # Move to 90 deg
-        target_pos = zero_pos + 90
-        self.motor.set_position(target_pos)
-        pos = self.wait_for_position(target_pos)
-        if pos is None:
-            return
-        print(f"Position: {pos:+.5f}°")
-
-        # Record "no load" current
-        fb = self.motor.get_motor_feedback()
-        if fb is None:
-            print("Error: Couldn't get current feedback")
-            self._cleanup()
-            return
-
-        train_data["added_mass"].append(num_weights * inc_weight * 0.001)
-        train_data["current"].append(fb.current)
-
-        while num_weights < total_weights:
-            # Add the weights
-            print(f"No. of weights: {num_weights}")
-            num_weights += int(input("Enter how many weights were added: "))
-
-            # Wait for position to stabilise
-            pos = self.wait_for_position(target_pos)
-            if pos is None:
-                return
-
-            # Measure the current
-            fb = self.motor.get_motor_feedback()
-            if fb is None:
-                print("Error: Couldn't get current feedback")
-                self._cleanup()
-                return
-
-            # Record data for training
-            train_data["added_mass"].append(num_weights * inc_weight * 0.001)
-            train_data["current"].append(fb.current)
-
-        df = pd.DataFrame(data=train_data)
-        df.to_csv(train_data_output)
-
-    def wait_for_position(self, target: float, eps: float=0.1) -> float | None:
-        abs_err_sample = deque(maxlen=99)
-        abs_err_sample.append(np.inf)
-        pos = 0
-        while True:
-            if not self._running:
-                self._cleanup()
-                return None
-
-            pos = self.motor.get_position()
-            if pos is None:
-                print("Error: Couldn't get feedback while moving to position")
-                self._cleanup()
-                return None
-
-            abs_err_sample.append(np.abs(target - pos))
-            if np.max(abs_err_sample) < eps:
-                break
-        return pos
-
-
-    def _cleanup(self):
-        print("Info: Shutting down motor")
-        self.motor.shutdown_motor()
-        self.bus.shutdown()
-
     def run(self):
-        # self.observe()
-        # self.gravity_compensation()
-        self.find_torque_constant("output.csv")
+        try:
+            self.gravity_compensation()
+
+        except (RuntimeError, UserCancelledException) as e:
+            print(e)
+
+        finally:
+            self.error_signal.emit()
+            print("Info: Shutting down motor")
+            self.motor.shutdown_motor()
+            self.bus.shutdown()
 
     def stop(self):
         self._running = False
@@ -349,7 +220,6 @@ def main():
 
     window.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
