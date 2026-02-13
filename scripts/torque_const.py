@@ -108,9 +108,9 @@ class TorqueConstExperiment(PlotDataSource):
         train_data = { "added_mass": [], "current": [] }
 
         gravity = 9.81
-        lever_arm = 0.001 * float(input("Enter length of lever arm (mm): "))
-        inc_weight = 0.001 * float(input("Enter mass of each weight to be added (g): "))
-        max_weights_num = int(input("Enter total number of weights to be added: "))
+        lever_arm = 0.225       # length of lever arm
+        inc_weight = 0.0525     # mass of each weight to be added
+        max_weights_num = 10    # total number of weights to be added
 
         input("Point the link straight downwards and press Enter: ")
 

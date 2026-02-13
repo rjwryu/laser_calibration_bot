@@ -59,7 +59,7 @@ class LiveMotorPlotWindow(QWidget):
         self.plots = {}
         self.times = deque(maxlen=sample_window)
 
-        # --- Setup Threading ---
+        # Setup Threading
         self._thread = QThread()
         self._worker = data_source
         self._worker.moveToThread(self._thread)
