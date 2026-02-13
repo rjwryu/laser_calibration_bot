@@ -4,10 +4,10 @@ desc = """\
 Procedure to find the torque constant of a motor experimentally.
 """
 
-
 import argparse
 from collections import deque
 import sys
+import time
 
 from PySide6.QtWidgets import QApplication
 import can
@@ -28,7 +28,7 @@ class TorqueConstExperiment(PlotDataSource):
         self.train_data_output = train_data_output
         self._running = False
 
-    def _wait_for_static(self, pos_eps: float=0.1, cur_eps: float=0.1) -> tuple[float, float]:
+    def _wait_for_static(self, pos_eps: float=0.1, cur_eps: float=0.1, delay: float=3) -> tuple[float, float]:
         pos_change_sample = deque(maxlen=99)
         cur_change_sample = deque(maxlen=99)
         pos = 0
@@ -36,9 +36,14 @@ class TorqueConstExperiment(PlotDataSource):
         prev_pos = np.inf
         prev_cur = np.inf
 
+        end_time = time.time() + delay
         while True:
             if not self._running:
                 raise RuntimeError("Info: Cancelled by user")
+
+            if time.time() < end_time:
+                time.sleep(0.1)
+                continue
 
             pos = self.motor.get_position()
             if pos is None:
@@ -62,7 +67,7 @@ class TorqueConstExperiment(PlotDataSource):
     def _do_trials(self, max_weights_num: int, inc_weight: float, train_data: dict[str, list[float]]):
         is_reversed = False
         num_weights = 0
-        while num_weights < max_weights_num:
+        while True:
             print(f"No. of weights: {num_weights}")
 
             pos, cur = self._wait_for_static()
@@ -113,16 +118,20 @@ class TorqueConstExperiment(PlotDataSource):
         zero_pos = self.motor.get_position()
         if zero_pos is None:
             raise RuntimeError("Error: Couldn't get initial position")
-        print(f"Zero position: {zero_pos:+.5f}°")
+        print(f"Zero position: {zero_pos:+.2f}°")
 
         # Move to 90 deg and start trials
+        print(f"Info: Moving to +90°")
         self.motor.set_position(zero_pos + 90)
         self._do_trials(max_weights_num, inc_weight, train_data)
 
         # Move from the other direction and do trials again (to compensate for friction/hysteresis)
         self._wait_for_static()
+        print("Info: Moving to +180°")
         self.motor.set_position(zero_pos + 180)
+
         self._wait_for_static()
+        print("Info: Moving to +90°")
         self.motor.set_position(zero_pos + 90)
         self._do_trials(max_weights_num, inc_weight, train_data)
 
@@ -137,9 +146,9 @@ class TorqueConstExperiment(PlotDataSource):
     def run(self) -> None:
         self._running = True
         try:
-            self._run_experiment
+            self._run_experiment()
 
-        except RuntimeError as e:
+        except Exception as e:
             print(e)
 
         finally:
@@ -181,7 +190,7 @@ def main():
     args = parser.parse_args()
     app = QApplication(sys.argv)
     data_source = TorqueConstExperiment(args.interface, args.motor, args.max_speed, args.output)
-    window = LiveMotorPlotWindow(data_source, args.samples, args.plot_wrap)
+    window = LiveMotorPlotWindow(data_source, 1, 2)
 
     window.show()
     sys.exit(app.exec())

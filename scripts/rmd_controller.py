@@ -176,7 +176,7 @@ class RMDController:
 
         return MotorFeedback(reply)
 
-    def set_position(self, position: float, max_speed: float = 0) -> MotorFeedback | None:
+    def set_position(self, position: float, max_speed: float = 100) -> MotorFeedback | None:
         """
         Set the motor absolute position to a given value (in degrees).
 
