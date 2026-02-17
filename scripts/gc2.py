@@ -17,10 +17,6 @@ from motor_liveplot import Datapoint, LiveMotorPlotWindow, PlotDataSource
 from rmd_controller import RMDController
 
 
-class UserCancelledException(Exception):
-    pass
-
-
 @dataclass
 class GravityModelParams:
     k: float        # torque constant
@@ -44,7 +40,6 @@ class GravityRLS:
         :param vel: Angular velocity in radians/second
         :param acc: Angular acceleration in radians/second²
         :param cur: Feedback current in amperes
-        :return: Learned parameters, in a tuple (C1, C2, B/K, J/K)
         """
 
         # 1. Create the regressor vector for the current angle
@@ -99,14 +94,13 @@ class GCMotorController(PlotDataSource):
         super().__init__()
         self.bus = can.Bus(channel=can_channel, interface="socketcan")
         self.motor = RMDController(motor_id, self.bus)
-        params = GravityModelParams(k=1, b=1, j=1, mgr=1, alpha=1)
+        params = GravityModelParams(k=0.5641, b=1, j=1, mgr=1, alpha=1)
         self.gc_solver = GravityRLS(params)
         self.max_speed = max_speed
         self.max_current = max_current
         self._start_time = time.time()
 
     def gravity_compensation(self):
-        print("Info: Starting motor")
         self._running = True
         past_speed = 0
         prev_time = time.time() - self._start_time
@@ -130,11 +124,10 @@ class GCMotorController(PlotDataSource):
             current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
             fb = self.motor.set_current(current_setpoint)
             if fb is None:
-                continue
+                raise RuntimeError("Error: Could not apply current")
 
             # Enforce speed limit with emergency stop
-            if abs(fb.speed) > self.max_speed:
-                self.error_signal.emit()
+            if np.abs(fb.speed) > self.max_speed:
                 raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
 
             # Process the results of sending current
@@ -159,10 +152,11 @@ class GCMotorController(PlotDataSource):
             )
 
     def run(self):
+        print("Info: Starting gravity compensation")
         try:
             self.gravity_compensation()
 
-        except (RuntimeError, UserCancelledException) as e:
+        except RuntimeError as e:
             print(e)
 
         finally:
