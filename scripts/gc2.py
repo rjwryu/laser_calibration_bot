@@ -103,6 +103,8 @@ class GCMotorController(PlotDataSource):
         self.gc_solver = GravityRLS(params)
         self.max_speed = max_speed
         self.max_current = max_current
+        self.update_threshold_speed = 0.01      # rad / s
+        self.update_threshold_accel = 0.01      # rad / s^2
         self._start_time = time.time()
 
     def gravity_compensation(self):
@@ -142,10 +144,14 @@ class GCMotorController(PlotDataSource):
             cur = fb.current
             past_speed = speed
 
-            # Update coefficients of gravity model through RLS
-            self.gc_solver.update(angle, speed, accel, cur)
+            # Update coefficients of gravity model through RLS, but only when moving
+            is_updated = False
+            if np.abs(speed) > self.update_threshold_speed or np.abs(accel) > self.update_threshold_accel:
+                self.gc_solver.update(angle, speed, accel, cur)
+                is_updated = True
+
             params = self.gc_solver.params
-            print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+            print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, updated: {is_updated:5}, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
 
             self.update_signal.emit(
                 elapsed_time,
