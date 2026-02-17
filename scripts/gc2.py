@@ -31,6 +31,8 @@ class GravityRLS:
         self.params = params
         self.lmbda = lmbda  # Forgetting factor (0.9 to 0.999)
         self.P = np.eye(4) * delta     # Initial uncertainty matrix
+        self.j_min = 1e-6
+        self.b_min = 1e-6
 
     def update(self, pos: float, vel: float, acc: float, cur: float) -> None:
         """
@@ -66,7 +68,10 @@ class GravityRLS:
         K = num / den
 
         # 4. Update Estimates
-        theta = theta + K * error
+        new_theta = theta + K * error
+        new_theta[0, 0] = max(new_theta[0, 0], self.j_min)
+        new_theta[1, 0] = max(new_theta[1, 0], self.b_min)
+        theta = new_theta
 
         # 5. Update Covariance Matrix (P)
         self.P = (self.P - (K @ phi.T @ self.P)) / self.lmbda
