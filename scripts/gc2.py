@@ -109,7 +109,7 @@ class GCMotorController(PlotDataSource):
 
     def gravity_compensation(self):
         self._running = True
-        past_speed = 0
+        past_speed_rad = 0
         prev_time = time.time() - self._start_time
 
         fb = self.motor.get_motor_feedback()
@@ -117,9 +117,9 @@ class GCMotorController(PlotDataSource):
             raise RuntimeError("Error: Could not get motor feedback")
 
         # Process the results of sending current
-        angle = (fb.position % 360) * np.pi / 180
-        speed = fb.speed * np.pi / 180
-        accel = 0
+        angle_rad = (fb.position % 360) * np.pi / 180
+        speed_rad = fb.speed * np.pi / 180
+        accel_rad = 0
 
         while self._running:
             elapsed_time = time.time() - self._start_time
@@ -127,7 +127,7 @@ class GCMotorController(PlotDataSource):
             prev_time = elapsed_time
 
             # Use model to predict the current to apply
-            current_setpoint = self.gc_solver.predict(angle, speed, accel)
+            current_setpoint = self.gc_solver.predict(angle_rad, speed_rad, accel_rad)
             current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
             fb = self.motor.set_current(current_setpoint)
             if fb is None:
@@ -138,16 +138,16 @@ class GCMotorController(PlotDataSource):
                 raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
 
             # Process the results of sending current
-            angle = (fb.position % 360) * np.pi / 180
-            speed = fb.speed * np.pi / 180
-            accel = (speed - past_speed) / delta_time
-            cur = fb.current
-            past_speed = speed
+            angle_rad = (fb.position % 360) * np.pi / 180
+            speed_rad = fb.speed * np.pi / 180
+            accel_rad = (speed_rad - past_speed_rad) / delta_time
+            feedback_current = fb.current
+            past_speed_rad = speed_rad
 
             # Update coefficients of gravity model through RLS, but only when moving
             is_updated = False
-            if np.abs(speed) > self.update_threshold_speed or np.abs(accel) > self.update_threshold_accel:
-                self.gc_solver.update(angle, speed, accel, cur)
+            if np.abs(speed_rad) > self.update_threshold_speed or np.abs(accel_rad) > self.update_threshold_accel:
+                self.gc_solver.update(angle_rad, speed_rad, accel_rad, feedback_current)
                 is_updated = True
 
             params = self.gc_solver.params
