@@ -17,6 +17,10 @@ from motor_liveplot import Datapoint, LiveMotorPlotWindow, PlotDataSource
 from rmd_controller import RMDController
 
 
+def exp_filter(new_data: float, old_data: float, alpha: float=0.1) -> float:
+    return old_data + alpha * (new_data - old_data)
+
+
 @dataclass
 class GravityModelParams:
     k: float        # torque constant
@@ -110,6 +114,7 @@ class GCMotorController(PlotDataSource):
     def gravity_compensation(self):
         self._running = True
         past_speed_rad = 0
+        past_accel_rad = 0
         prev_time = time.time() - self._start_time
 
         fb = self.motor.get_motor_feedback()
@@ -140,9 +145,11 @@ class GCMotorController(PlotDataSource):
             # Process the results of sending current
             angle_rad = (fb.position % 360) * np.pi / 180
             speed_rad = fb.speed * np.pi / 180
-            accel_rad = (speed_rad - past_speed_rad) / delta_time
+            accel_rad_raw = (speed_rad - past_speed_rad) / delta_time
+            accel_rad = exp_filter(accel_rad_raw, past_accel_rad, 0.1)
             feedback_current = fb.current
             past_speed_rad = speed_rad
+            past_accel_rad = accel_rad
 
             # Update coefficients of gravity model through RLS, but only when moving
             is_updated = False
