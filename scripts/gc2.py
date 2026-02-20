@@ -5,6 +5,7 @@ Second attempt at gravity compensation, real-time gravity compensation.
 """
 
 import argparse
+from collections import deque
 from dataclasses import dataclass
 import sys
 import time
@@ -32,38 +33,40 @@ class GravityModelParams:
 
 class GravityRLS:
     def __init__(self, params: GravityModelParams, lmbda=0.995, delta=100.0):
-        self.params = params
+        self.k = params.k
         self.lmbda = lmbda  # Forgetting factor (0.9 to 0.999)
-        self.P = np.eye(4) * delta     # Initial uncertainty matrix
-        self.j_min = 1e-6
-        self.b_min = 1e-6
+        self.P = np.eye(1) * delta     # Initial uncertainty matrix
+        self.theta = np.array([         # Coefficients to learn
+            [params.mgr],
+        ])
+        self.theta_bounds = np.array([  # Clamp coefficients
+            [0, np.inf],
+        ])
 
-    def update(self, pos: float, vel: float, acc: float, cur: float) -> None:
+    def get_params(self) -> GravityModelParams:
+        """ Obtain model parameters. """
+        return GravityModelParams(k=self.k, b=np.nan, j=np.nan, mgr=self.theta[0, 0], alpha=np.nan)
+
+    def update(self, pos: float, cur: float) -> None:
         """
         Update the recursive solver with new data.
 
-        :param pos: Angular position in radians
-        :param vel: Angular velocity in radians/second
-        :param acc: Angular acceleration in radians/second²
-        :param cur: Feedback current in amperes
+        Parameters:
+        - pos (float): Absolute angular position in degrees
+        - cur (float): Feedback current in amperes
+
+        Returns:
+        - None
         """
 
         # 1. Create the regressor vector for the current angle
+        pos = (pos % 360) * np.pi / 180     # Convert to radians
         phi = np.array([
-            [acc],
-            [vel],
-            [np.sin(pos)],
             [np.cos(pos)],
         ])
 
         # 2. Prediction Error
-        theta = np.array([
-            [self.params.j],
-            [self.params.b],
-            [self.params.mgr * np.cos(self.params.alpha)],
-            [self.params.mgr * np.sin(self.params.alpha)],
-        ])
-        error = self.params.k * cur - (phi.T @ theta)[0, 0]
+        error = self.k * cur - (phi.T @ self.theta)[0, 0]
 
         # 3. Calculate Gain Vector (K)
         # K tells us how much to change parameters based on the error
@@ -72,38 +75,38 @@ class GravityRLS:
         K = num / den
 
         # 4. Update Estimates
-        new_theta = theta + K * error
-        new_theta[0, 0] = max(new_theta[0, 0], self.j_min)
-        new_theta[1, 0] = max(new_theta[1, 0], self.b_min)
-        theta = new_theta
+        new_theta = self.theta + K * error
+        self.theta = np.clip(new_theta, self.theta_bounds[:, [0]], self.theta_bounds[:, [1]])
 
         # 5. Update Covariance Matrix (P)
         self.P = (self.P - (K @ phi.T @ self.P)) / self.lmbda
 
-        new_params = theta.flatten()
-        self.params.j = new_params[0]
-        self.params.b = new_params[1]
-        self.params.mgr = np.hypot(new_params[2], new_params[3])
-        self.params.alpha = np.arctan2(new_params[2], new_params[3])
-
-    def predict(self, pos: float, vel: float, acc: float) -> float:
+    def predict(self, pos: float) -> float:
         """
         Use learned parameters to make a prediction of current.
 
-        :param pos: Angular position in radians
-        :param vel: Angular velocity in radians/second
-        :param acc: Angular acceleration in radians/second²
-        :return: Current prediction in amperes
+        Parameters:
+        - pos (float): Absolute angular position in degrees
+
+        Returns:
+        - (float): Current prediction in amperes
         """
-        return (self.params.mgr * np.cos(pos + self.params.alpha) + self.params.b * vel + self.params.j * acc) / self.params.k
+
+        pos = (pos % 360) * np.pi / 180     # Convert to radians
+        phi = np.array([
+            [np.cos(pos)],
+        ])
+
+        return (phi.T @ self.theta)[0, 0]
 
 
 class GCMotorController(PlotDataSource):
     def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
         super().__init__()
+        self._running = False
         self.bus = can.Bus(channel=can_channel, interface="socketcan")
         self.motor = RMDController(motor_id, self.bus)
-        params = GravityModelParams(k=0.5641, b=1, j=1, mgr=1, alpha=1)
+        params = GravityModelParams(k=0.5641, b=1, j=1, mgr=1, alpha=0)
         self.gc_solver = GravityRLS(params)
         self.max_speed = max_speed
         self.max_current = max_current
@@ -111,68 +114,146 @@ class GCMotorController(PlotDataSource):
         self.update_threshold_accel = 0.01      # rad / s^2
         self._start_time = time.time()
 
-    def gravity_compensation(self):
+    def calibrate(self) -> None:
+        setpoint_speed = 100
+        past_speeds = deque(maxlen=99)
+        speed_eps = 10
+        speed_is_unstable = True
+
+        self.motor.set_speed(setpoint_speed)
         self._running = True
-        past_speed_rad = 0
-        past_accel_rad = 0
-        prev_time = time.time() - self._start_time
-
-        fb = self.motor.get_motor_feedback()
-        if fb is None:
-            raise RuntimeError("Error: Could not get motor feedback")
-
-        # Process the results of sending current
-        angle_rad = (fb.position % 360) * np.pi / 180
-        speed_rad = fb.speed * np.pi / 180
-        accel_rad = 0
+        start_pos = self.motor.get_position()
+        if start_pos is None:
+            raise RuntimeError("Error: Could not get motor position")
 
         while self._running:
             elapsed_time = time.time() - self._start_time
-            delta_time = elapsed_time - prev_time
-            prev_time = elapsed_time
 
-            # Use model to predict the current to apply
-            current_setpoint = self.gc_solver.predict(angle_rad, speed_rad, accel_rad)
-            current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
-            fb = self.motor.set_current(current_setpoint)
+            fb = self.motor.get_motor_feedback()
             if fb is None:
-                raise RuntimeError("Error: Could not apply current")
+                raise RuntimeError("Error: Could not get motor feedback")
 
-            # Enforce speed limit with emergency stop
+            # Emergency stop
             if np.abs(fb.speed) > self.max_speed:
                 raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
 
-            # Process the results of sending current
-            angle_rad = (fb.position % 360) * np.pi / 180
-            speed_rad = fb.speed * np.pi / 180
-            accel_rad_raw = (speed_rad - past_speed_rad) / delta_time
-            accel_rad = exp_filter(accel_rad_raw, past_accel_rad, 0.1)
-            feedback_current = fb.current
-            past_speed_rad = speed_rad
-            past_accel_rad = accel_rad
+            pos = self.motor.get_position()
+            if pos is None:
+                raise RuntimeError("Error: Could not get motor position")
 
-            # Update coefficients of gravity model through RLS, but only when moving
-            is_updated = False
-            if np.abs(speed_rad) > self.update_threshold_speed or np.abs(accel_rad) > self.update_threshold_accel:
-                self.gc_solver.update(angle_rad, speed_rad, accel_rad, feedback_current)
-                is_updated = True
+            pos_bound = pos % 360
+            pos_bound_rad = pos_bound * np.pi / 180
 
-            params = self.gc_solver.params
-            print(f"Info: {fb.position % 360:+10.5f}°, {fb.current:+10.5f}A, updated: {is_updated:5}, k: {params.k:+10.5f}, b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+            # Wait until stable speed and mark start pos
+            if speed_is_unstable:
+                # Stop if cannot reach stable speed in 90deg
+                if pos >= start_pos + 90:
+                    raise RuntimeError("Error: Could not reach stable speed")
 
-            self.update_signal.emit(
-                elapsed_time,
-                [
-                    Datapoint(fb.position, "position", "degrees", "y"),
-                    Datapoint(fb.speed, "speed", "degrees/s", "c"),
-                    Datapoint(fb.current, "amperes", "amperes", "m"),
-                ],
-            )
+                past_speeds.append(fb.speed)
+
+                if len(past_speeds) == past_speeds.maxlen and np.std(past_speeds) < speed_eps:
+                    speed_is_unstable = False
+                    start_pos = pos
+
+                print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, std: {np.std(past_speeds):10.5f}°/s")
+
+                self.update_signal.emit(
+                    elapsed_time,
+                    [
+                        Datapoint(fb.position, "position", "degrees", "y"),
+                        Datapoint(fb.speed, "speed", "degrees/s", "c"),
+                        Datapoint(fb.current, "amperes", "amperes", "m"),
+                        Datapoint(0, "mgr", "", "g"),
+                    ],
+                )
+            else:
+                # Stop when traversed 360 from start pos
+                if pos >= start_pos + 360:
+                    print("Info: Experiment completed successfully")
+                    break
+
+                # self.gc_solver.update(pos, fb.current)
+                p = self.gc_solver.get_params()
+
+                mgr = p.k * fb.current / np.cos(pos_bound_rad)
+
+                print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, mgr: {mgr:+10.5f}")
+
+                self.update_signal.emit(
+                    elapsed_time,
+                    [
+                        Datapoint(fb.position, "position", "degrees", "y"),
+                        Datapoint(fb.speed, "speed", "degrees/s", "c"),
+                        Datapoint(fb.current, "amperes", "amperes", "m"),
+                        Datapoint(mgr, "mgr", "", "g"),
+                    ],
+                )
+
+    # def gravity_compensation(self):
+    #     self._running = True
+    #     past_speed_rad = 0
+    #     past_accel_rad = 0
+    #     prev_time = time.time() - self._start_time
+    #
+    #     fb = self.motor.get_motor_feedback()
+    #     if fb is None:
+    #         raise RuntimeError("Error: Could not get motor feedback")
+    #
+    #     # Process the results of sending current
+    #     angle_rad = (fb.position % 360) * np.pi / 180
+    #     speed_rad = fb.speed * np.pi / 180
+    #     accel_rad = 0
+    #
+    #     while self._running:
+    #         elapsed_time = time.time() - self._start_time
+    #         delta_time = elapsed_time - prev_time
+    #         prev_time = elapsed_time
+    #
+    #         # Use model to predict the current to apply
+    #         current_setpoint = self.gc_solver.predict(angle_rad, speed_rad, accel_rad)
+    #         current_setpoint = np.clip(current_setpoint, -self.max_current, self.max_current)
+    #         fb = self.motor.set_current(current_setpoint)
+    #         if fb is None:
+    #             raise RuntimeError("Error: Could not apply current")
+    #
+    #         # Enforce speed limit with emergency stop
+    #         if np.abs(fb.speed) > self.max_speed:
+    #             raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
+    #
+    #         # Process the results of sending current
+    #         angle_rad = (fb.position % 360) * np.pi / 180
+    #         speed_rad = fb.speed * np.pi / 180
+    #         accel_rad_raw = (speed_rad - past_speed_rad) / delta_time
+    #         accel_rad = exp_filter(accel_rad_raw, past_accel_rad, 0.1)
+    #         feedback_current = fb.current
+    #         past_speed_rad = speed_rad
+    #         past_accel_rad = accel_rad
+    #
+    #         # Update coefficients of gravity model through RLS, but only when moving
+    #         is_updated = False
+    #         if np.abs(speed_rad) > self.update_threshold_speed or np.abs(accel_rad) > self.update_threshold_accel:
+    #             self.gc_solver.update(angle_rad, speed_rad, accel_rad, feedback_current)
+    #             is_updated = True
+    #
+    #         params = self.gc_solver.params
+    #         print(f"Info: {fb.position % 360:+4d}°, {fb.speed:+6d}°/s, {fb.current:+6.2f}A, updated: {is_updated:1},  b: {params.b:+10.5f}, j: {params.j:+10.5f}, mgr: {params.mgr:+10.5f}, alpha: {params.alpha:+10.5f}")
+    #
+    #         self.update_signal.emit(
+    #             elapsed_time,
+    #             [
+    #                 Datapoint(fb.position, "position", "degrees", "y"),
+    #                 Datapoint(fb.speed, "speed", "degrees/s", "c"),
+    #                 Datapoint(fb.current, "amperes", "amperes", "m"),
+    #             ],
+    #         )
 
     def run(self):
-        print("Info: Starting gravity compensation")
         try:
-            self.gravity_compensation()
+            print("Info: Starting calibration procedure")
+            self.calibrate()
+            # print("Info: Starting gravity compensation")
+            # self.gravity_compensation()
 
         except RuntimeError as e:
             print(e)
