@@ -1,36 +1,19 @@
 #!/usr/bin/env python
 # Author: Su Jing Long, Brian
 desc = """\
-Live plotting of motor feedback.
+Live plotting of feedback.
 """
 
-from collections import deque
-from dataclasses import dataclass
-from typing import Any
-
-from PySide6.QtCore import QThread, QObject, Signal
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtWidgets import QMainWindow, QVBoxLayout
 import pyqtgraph as pg
 
 
-@dataclass
-class Datapoint:
-    data: float
-    title: str
-    units: str
-    colour: str
-
-
-@dataclass
-class Plot:
-    plot: Any
-    curve: Any
-    buffer: deque
-
-
-class PlotDataSource(QObject):
-    update_signal = Signal(float, list)
-    error_signal = Signal()
+class LivePlotDataSource(QObject):
+    close_signal = Signal()
+    add_plot_signal = Signal(tuple, str, tuple)
+    add_curve_signal = Signal(str, str, str, bool)
+    update_curve_signal = Signal(str, str, list, list)
 
     def __init__(self):
         super().__init__()
@@ -42,8 +25,8 @@ class PlotDataSource(QObject):
         pass
 
 
-class LiveMotorPlotWindow(QWidget):
-    def __init__(self, data_source: PlotDataSource, sample_window: int, plot_wrap: int):
+class LivePlotWindow(QMainWindow):
+    def __init__(self, data_source: LivePlotDataSource, sample_window: int, plot_wrap: int):
         super().__init__()
 
         self._sample_window = sample_window
@@ -56,8 +39,8 @@ class LiveMotorPlotWindow(QWidget):
         self._win = pg.GraphicsLayoutWidget(show=True)
         self._layout.addWidget(self._win)
 
-        self.plots = {}
-        self.times = deque(maxlen=sample_window)
+        self._plots = {}
+        self._curves = {}
 
         # Setup Threading
         self._thread = QThread()
@@ -66,37 +49,43 @@ class LiveMotorPlotWindow(QWidget):
 
         # Connect signals
         self._thread.started.connect(self._worker.run)
-        self._worker.update_signal.connect(self.update_plot)
-        self._worker.error_signal.connect(self.close)
+        self._worker.close_signal.connect(self.close)
+        self._worker.add_plot_signal.connect(self.add_plot)
+        self._worker.add_curve_signal.connect(self.add_curve)
+        self._worker.update_curve_signal.connect(self.update_curve)
 
         self._thread.start()
 
-    def add_plot(self, title: str, colour: str="k", units: str=""):
-        num_plots = len(self.plots)
-        if num_plots > 0 and num_plots % self._plot_wrap == 0:
-            self._win.nextRow()
+    def add_plot(self, grid: tuple[int, int], title: str, units: tuple[str, str]=("","")):
+        plot = self._win.addPlot(row=grid[0], col=grid[1], title=title)
+        plot.showGrid(x=True, y=True)
 
-        plot = self._win.addPlot(title=title)
-        curve = plot.plot(pen=colour)
-        plot.setLabel("left", units)
-        buffer = deque(maxlen=self._sample_window)
+        if units[0] != "":
+            plot.setLabel("bottom", units=units[0])
+        if units[1] != "":
+            plot.setLabel("left", units=units[1])
 
-        self.plots[title] = Plot(plot, curve, buffer)
+        self._plots[title] = plot
+        self._curves[title] = {}
 
-    def update_plot(self, timestamp: float, datapoints: list[Datapoint]):
-        """This runs in the Main Thread whenever the worker sends data."""
-        # Add common timestamp
-        self.times.append(timestamp)
+    def add_curve(self, plot_title: str, label: str, colour="r", is_scatter=False):
+        plot = self._plots[plot_title]
 
-        for dp in datapoints:
-            # Add plot if not already existing
-            if dp.title not in self.plots:
-                self.add_plot(dp.title, dp.colour, dp.units)
+        if label == "":
+            label = plot_title
+        else:
+            plot.addLegend()
 
-            # Set the data and plot
-            p = self.plots[dp.title]
-            p.buffer.append(dp.data)
-            p.curve.setData(list(self.times), list(p.buffer))
+        curve = None
+        if is_scatter:
+            curve = plot.scatterPlot(name=label, pen=colour)
+        else:
+            curve = plot.plot(name=label, pen=colour)
+
+        self._curves[plot_title][label] = curve
+
+    def update_curve(self, plot_title: str, label: str, x, y):
+        self._curves[plot_title][label or plot_title].setData(x, y)
 
     def closeEvent(self, event):
         """Clean up threads when window is closed."""

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 import can
 import numpy as np
 
-from motor_liveplot import Datapoint, LiveMotorPlotWindow, PlotDataSource
+from motor_liveplot import LivePlotWindow, LivePlotDataSource
 from rmd_controller import RMDController
 
 
@@ -100,7 +100,25 @@ class GravityRLS:
         return (phi.T @ self.theta)[0, 0]
 
 
-class GCMotorController(PlotDataSource):
+class MotorFeedbackData:
+    """Structure to hold historical motor feedback data."""
+
+    def __init__(self, maxlen=300):
+        self.timestamps = deque(maxlen=maxlen)
+        self.positions = deque(maxlen=maxlen)
+        self.velocities = deque(maxlen=maxlen)
+        self.currents = deque(maxlen=maxlen)
+
+
+class MgrData:
+    """Structure to hold historical mgr data."""
+
+    def __init__(self, maxlen=300):
+        self.timestamps = deque(maxlen=maxlen)
+        self.mgr = deque(maxlen=maxlen)
+
+
+class GCMotorController(LivePlotDataSource):
     def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
         super().__init__()
         self._running = False
@@ -112,16 +130,41 @@ class GCMotorController(PlotDataSource):
         self.max_current = max_current
         self.update_threshold_speed = 0.01      # rad / s
         self.update_threshold_accel = 0.01      # rad / s^2
+        self._fb_data = MotorFeedbackData()
+        self._mgr_data = MgrData()
         self._start_time = time.time()
+
+    def _create_fb_graph(self):
+        self.add_plot_signal.emit((0, 0), "position", ("degrees", "s"))
+        self.add_curve_signal.emit("position", "", "y", False)
+        self.add_plot_signal.emit((1, 0), "velocity", ("degrees/s", "s"))
+        self.add_curve_signal.emit("velocity", "", "c", False)
+        self.add_plot_signal.emit((0, 1), "current", ("amperes", "s"))
+        self.add_curve_signal.emit("current", "", "m", False)
+
+    def _update_fb_graph(self):
+        self.update_curve_signal.emit("position", "", self._fb_data.timestamps, self._fb_data.positions)
+        self.update_curve_signal.emit("velocity", "", self._fb_data.timestamps, self._fb_data.velocities)
+        self.update_curve_signal.emit("current", "", self._fb_data.timestamps, self._fb_data.currents)
+        self.update_curve_signal.emit("mgr", "", self._mgr_data.timestamps, self._mgr_data.mgr)
+
+    def _update_fb_data(self, time: float, pos: int, vel: int, cur: float):
+        self._fb_data.timestamps.append(time)
+        self._fb_data.positions.append(pos)
+        self._fb_data.velocities.append(vel)
+        self._fb_data.currents.append(cur)
 
     def calibrate(self) -> None:
         setpoint_speed = 100
-        past_speeds = deque(maxlen=99)
+        min_speed_datapoints = 99
         speed_eps = 10
         speed_is_unstable = True
-
-        self.motor.set_speed(setpoint_speed)
         self._running = True
+
+        self._create_fb_graph()
+
+        # Start moving
+        self.motor.set_speed(setpoint_speed)
         start_pos = self.motor.get_position()
         if start_pos is None:
             raise RuntimeError("Error: Could not get motor position")
@@ -141,8 +184,9 @@ class GCMotorController(PlotDataSource):
             if pos is None:
                 raise RuntimeError("Error: Could not get motor position")
 
+            self._update_fb_data(elapsed_time, fb.position, fb.speed, fb.current)
+
             pos_bound = pos % 360
-            pos_bound_rad = pos_bound * np.pi / 180
 
             # Wait until stable speed and mark start pos
             if speed_is_unstable:
@@ -150,23 +194,21 @@ class GCMotorController(PlotDataSource):
                 if pos >= start_pos + 90:
                     raise RuntimeError("Error: Could not reach stable speed")
 
-                past_speeds.append(fb.speed)
+                # Not enough samples to take stddev
+                if len(self._fb_data.velocities) < min_speed_datapoints:
+                    print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A")
 
-                if len(past_speeds) == past_speeds.maxlen and np.std(past_speeds) < speed_eps:
-                    speed_is_unstable = False
-                    start_pos = pos
+                else:
+                    std = np.std(self._fb_data.velocities)
 
-                print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, std: {np.std(past_speeds):10.5f}°/s")
+                    # Check stddev to ensure speed is stable
+                    if std < speed_eps:
+                        print("Info: Stable speed reached")
+                        speed_is_unstable = False
+                        start_pos = pos
 
-                self.update_signal.emit(
-                    elapsed_time,
-                    [
-                        Datapoint(fb.position, "position", "degrees", "y"),
-                        Datapoint(fb.speed, "speed", "degrees/s", "c"),
-                        Datapoint(fb.current, "amperes", "amperes", "m"),
-                        Datapoint(0, "mgr", "", "g"),
-                    ],
-                )
+                    print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, std: {std:10.5f}°/s")
+
             else:
                 # Stop when traversed 360 from start pos
                 if pos >= start_pos + 360:
@@ -176,19 +218,11 @@ class GCMotorController(PlotDataSource):
                 # self.gc_solver.update(pos, fb.current)
                 p = self.gc_solver.get_params()
 
-                mgr = p.k * fb.current / np.cos(pos_bound_rad)
+                mgr = p.k * fb.current / np.cos(pos_bound * np.pi / 180)
 
                 print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, mgr: {mgr:+10.5f}")
 
-                self.update_signal.emit(
-                    elapsed_time,
-                    [
-                        Datapoint(fb.position, "position", "degrees", "y"),
-                        Datapoint(fb.speed, "speed", "degrees/s", "c"),
-                        Datapoint(fb.current, "amperes", "amperes", "m"),
-                        Datapoint(mgr, "mgr", "", "g"),
-                    ],
-                )
+            self._update_fb_graph()
 
     # def gravity_compensation(self):
     #     self._running = True
@@ -259,7 +293,7 @@ class GCMotorController(PlotDataSource):
             print(e)
 
         finally:
-            self.error_signal.emit()
+            self.close_signal.emit()
             print("Info: Shutting down motor")
             self.motor.shutdown_motor()
             self.bus.shutdown()
@@ -309,7 +343,7 @@ def main():
     args = parser.parse_args()
     app = QApplication(sys.argv)
     controller = GCMotorController(args.interface, args.motor, args.max_speed, args.max_current)
-    window = LiveMotorPlotWindow(controller, args.samples, args.plot_wrap)
+    window = LivePlotWindow(controller, args.samples, args.plot_wrap)
 
     window.show()
     sys.exit(app.exec())
