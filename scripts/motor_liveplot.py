@@ -26,18 +26,17 @@ class LivePlotDataSource(QObject):
 
 
 class LivePlotWindow(QMainWindow):
-    def __init__(self, data_source: LivePlotDataSource, sample_window: int, plot_wrap: int):
+    def __init__(self, data_source: LivePlotDataSource, sample_window: int):
         super().__init__()
 
         self._sample_window = sample_window
-        self._plot_wrap = plot_wrap
 
         self.setWindowTitle("Motor Feedback")
-        self._layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
 
         # Setup Plot
         self._win = pg.GraphicsLayoutWidget(show=True)
-        self._layout.addWidget(self._win)
+        main_layout.addWidget(self._win)
 
         self._plots = {}
         self._curves = {}

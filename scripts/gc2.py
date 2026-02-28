@@ -6,6 +6,7 @@ Second attempt at gravity compensation, real-time gravity compensation.
 
 import argparse
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 import sys
 import time
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 import can
 import numpy as np
 
-from motor_liveplot import LivePlotWindow, LivePlotDataSource
+from motor_liveplot import LivePlotDataSource, LivePlotWindow
 from rmd_controller import RMDController
 
 
@@ -119,9 +120,10 @@ class MgrData:
 
 
 class GCMotorController(LivePlotDataSource):
-    def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float):
+    def __init__(self, can_channel: str, motor_id: int, max_speed: float, max_current: float, outfile: str):
         super().__init__()
         self._running = False
+        self._outfile = outfile
         self.bus = can.Bus(channel=can_channel, interface="socketcan")
         self.motor = RMDController(motor_id, self.bus)
         params = GravityModelParams(k=0.5641, b=1, j=1, mgr=1, alpha=0)
@@ -148,81 +150,96 @@ class GCMotorController(LivePlotDataSource):
         self.update_curve_signal.emit("current", "", self._fb_data.timestamps, self._fb_data.currents)
         self.update_curve_signal.emit("mgr", "", self._mgr_data.timestamps, self._mgr_data.mgr)
 
-    def _update_fb_data(self, time: float, pos: int, vel: int, cur: float):
+    def _update_fb_data(self, time: float, pos: float, vel: int, cur: float):
         self._fb_data.timestamps.append(time)
         self._fb_data.positions.append(pos)
         self._fb_data.velocities.append(vel)
         self._fb_data.currents.append(cur)
 
     def calibrate(self) -> None:
-        setpoint_speed = 100
-        min_speed_datapoints = 99
-        speed_eps = 10
-        speed_is_unstable = True
-        self._running = True
+        SETPOINT_SPEED = 100
+        MIN_SPEED_DATAPOINTS = 99
+        SPEED_EPS = 10
+        STABLE_SPEED_WINDOW_DEG = 90
+        TRAVERSION_WINDOW_DEG = 360
 
         self._create_fb_graph()
+        self.add_plot_signal.emit((1, 1), "mgr", ("s", ""))
+        self.add_curve_signal.emit("mgr", "", False)
 
-        # Start moving
-        self.motor.set_speed(setpoint_speed)
-        start_pos = self.motor.get_position()
-        if start_pos is None:
-            raise RuntimeError("Error: Could not get motor position")
+        # Open file for writing if it exists
+        ctx = open(self._outfile, "w") if self._outfile else nullcontext()
+        with ctx as outfile:
+            if outfile:
+                outfile.write("timestamp,position,velocity,current")
 
-        while self._running:
-            elapsed_time = time.time() - self._start_time
-
-            fb = self.motor.get_motor_feedback()
-            if fb is None:
-                raise RuntimeError("Error: Could not get motor feedback")
-
-            # Emergency stop
-            if np.abs(fb.speed) > self.max_speed:
-                raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
-
-            pos = self.motor.get_position()
-            if pos is None:
+            # Start moving
+            self.motor.set_speed(SETPOINT_SPEED)
+            start_pos = self.motor.get_position()
+            if start_pos is None:
                 raise RuntimeError("Error: Could not get motor position")
 
-            self._update_fb_data(elapsed_time, fb.position, fb.speed, fb.current)
+            speed_is_unstable = True
+            self._running = True
+            while self._running:
+                elapsed_time = time.time() - self._start_time
+                logmsg = []
 
-            pos_bound = pos % 360
+                fb = self.motor.get_motor_feedback()
+                if fb is None:
+                    raise RuntimeError("Error: Could not get motor feedback")
 
-            # Wait until stable speed and mark start pos
-            if speed_is_unstable:
-                # Stop if cannot reach stable speed in 90deg
-                if pos >= start_pos + 90:
-                    raise RuntimeError("Error: Could not reach stable speed")
+                # Emergency stop
+                if np.abs(fb.speed) > self.max_speed:
+                    raise RuntimeError("Fatal: Speed limit exceeded, stopping motor")
 
-                # Not enough samples to take stddev
-                if len(self._fb_data.velocities) < min_speed_datapoints:
-                    print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A")
+                pos = self.motor.get_position()
+                if pos is None:
+                    raise RuntimeError("Error: Could not get motor position")
+
+                self._update_fb_data(elapsed_time, pos, fb.speed, fb.current)
+                logmsg.append(f"{pos:+10.2f}°")
+                logmsg.append(f"{fb.speed:+5d}°/s")
+                logmsg.append(f"{fb.current:+6.2f}A")
+
+                # TODO: stability check may not be necessary
+                # Wait until stable speed and mark start pos
+                if speed_is_unstable:
+                    # Stop if cannot reach stable speed in given window
+                    if pos >= start_pos + STABLE_SPEED_WINDOW_DEG:
+                        raise RuntimeError("Error: Could not reach stable speed")
+
+                    # Only take stddev if there are enough samples
+                    if len(self._fb_data.velocities) >= MIN_SPEED_DATAPOINTS:
+                        std = np.std(self._fb_data.velocities)
+                        logmsg.append(f"std: {std:10.5f}°/s")
+
+                        # Once stddev is below threshold, speed is considered stable
+                        if std < SPEED_EPS:
+                            print("Info: Stable speed reached")
+                            speed_is_unstable = False
+                            start_pos = pos
 
                 else:
-                    std = np.std(self._fb_data.velocities)
+                    # Stop when traversed a given angular distance from start pos
+                    if pos >= start_pos + TRAVERSION_WINDOW_DEG:
+                        print("Info: Experiment completed successfully")
+                        break
 
-                    # Check stddev to ensure speed is stable
-                    if std < speed_eps:
-                        print("Info: Stable speed reached")
-                        speed_is_unstable = False
-                        start_pos = pos
+                    k = self.gc_solver.get_params().k
+                    mgr = k * fb.current / np.cos(pos * np.pi / 180)
+                    self._mgr_data.timestamps.append(elapsed_time)
+                    self._mgr_data.mgr.append(mgr)
 
-                    print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, std: {std:10.5f}°/s")
+                    logmsg.append(f"mgr: {mgr:+10.5f}")
 
-            else:
-                # Stop when traversed 360 from start pos
-                if pos >= start_pos + 360:
-                    print("Info: Experiment completed successfully")
-                    break
+                    if outfile:
+                        outfile.write(f"{elapsed_time},{pos},{fb.speed},{fb.current}\n")
 
-                # self.gc_solver.update(pos, fb.current)
-                p = self.gc_solver.get_params()
+                    self.update_curve_signal.emit("mgr", "", self._mgr_data.timestamps, self._mgr_data.mgr)
 
-                mgr = p.k * fb.current / np.cos(pos_bound * np.pi / 180)
-
-                print(f"{pos_bound:+10.2f}°, {fb.speed:+5d}°/s, {fb.current:+6.2f}A, mgr: {mgr:+10.5f}")
-
-            self._update_fb_graph()
+                print(", ".join(logmsg))
+                self._update_fb_graph()
 
     # def gravity_compensation(self):
     #     self._running = True
@@ -334,16 +351,15 @@ def main():
         help="Saturation current applied by the controller. Defaults to 5A."
     )
     parser.add_argument(
-        "-w", "--plot-wrap",
-        type=int,
-        default=2,
-        help="Number of plots per row. Defaults to 2."
+        "-o", "--outfile",
+        default="",
+        help="Output CSV file for test data. If unspecified, does not write test data to file."
     )
 
     args = parser.parse_args()
     app = QApplication(sys.argv)
-    controller = GCMotorController(args.interface, args.motor, args.max_speed, args.max_current)
-    window = LivePlotWindow(controller, args.samples, args.plot_wrap)
+    controller = GCMotorController(args.interface, args.motor, args.max_speed, args.max_current, args.outfile)
+    window = LivePlotWindow(controller, args.samples)
 
     window.show()
     sys.exit(app.exec())
